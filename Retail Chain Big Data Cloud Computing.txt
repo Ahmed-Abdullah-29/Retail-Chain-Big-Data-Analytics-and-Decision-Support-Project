@@ -1,0 +1,1333 @@
+# ============================================================================
+# RetailChain Big Data Analytics Pipeline
+# ============================================================================
+# Module    : COM7020 - Big Data and Cloud Computing
+# Student   : Ahmed Abdullah
+# University: Arden University
+# Date      : February 2026
+#
+# Description:
+#   This script implements a complete big data analytics pipeline for
+#   RetailChain, a national UK retailer. It covers every stage of the
+#   data engineering and analytics workflow:
+#
+#     Stage 1 - Installation & Imports
+#     Stage 2 - Spark Session Initialisation
+#     Stage 3 - Data Ingestion (Batch Processing)
+#     Stage 4 - Data Quality & Standardisation (Governance Layer)
+#     Stage 5 - KPI Computation (Analytics Layer)
+#     Stage 6 - Dashboard Visualisations (12 interactive Plotly charts)
+#     Stage 7 - Gauge Chart (Total Sales indicator)
+#     Stage 8 - City-level Drill-Down (interactive widget)
+#     Stage 9 - Integrated HTML Dashboard (self-contained output)
+#
+# Framework : Apache Spark (PySpark) + Plotly
+# Dataset   : UK Retail Un-balance Synthetic Data Set.csv
+# Environment: Google Colab
+#
+# GitHub Submission - COM7020 Assessment
+# ============================================================================
+
+
+# ============================================================================
+# STAGE 1: INSTALLATION AND IMPORTS
+# ============================================================================
+# All required libraries are imported here.
+# If running in Google Colab for the first time, uncomment the pip line below
+# to install PySpark, Plotly, and ipywidgets before importing.
+
+# Uncomment the line below ONLY on first run in a fresh Colab environment:
+# !pip install -q pyspark plotly ipywidgets
+
+import pandas as pd                          # Pandas for local DataFrames and chart data prep
+import plotly.express as px                  # Plotly Express for high-level chart creation
+import plotly.io as pio                      # Plotly IO for renderer configuration
+from plotly.subplots import make_subplots    # Subplot layout builder
+import plotly.graph_objects as go            # Low-level Plotly objects (Gauge, Indicator)
+import json                                  # JSON serialisation for the HTML dashboard
+
+# Configure Plotly rendering for Google Colab
+pio.renderers.default = "colab"              # Render charts inline inside Colab notebooks
+px.defaults.template = "plotly_white"        # Apply a clean, professional white background theme
+
+# Enable ipywidgets interactive support in Colab
+# This allows dropdown widgets (used in the drill-down chart) to function correctly
+from google.colab import output
+output.enable_custom_widget_manager()
+
+# PySpark imports - core distributed processing framework
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col,              # Column reference helper
+    to_timestamp,     # Converts string to timestamp type
+    regexp_replace,   # Removes unwanted characters (e.g., commas in numbers)
+    when,             # Conditional expression (equivalent to SQL CASE WHEN)
+    lit,              # Creates a literal/constant column value
+    year,             # Extracts year from a timestamp
+    month,            # Extracts month from a timestamp
+    dayofmonth,       # Extracts day-of-month from a timestamp
+    weekofyear,       # Extracts ISO week number from a timestamp
+    concat_ws,        # Concatenates strings with a separator
+    lpad,             # Left-pads a string (used for zero-padded month labels)
+    sum   as Fsum,    # Aggregate: sum (aliased to avoid conflict with Python built-in)
+    count as Fcount,  # Aggregate: row count
+    avg   as Favg,    # Aggregate: arithmetic mean
+    max   as Fmax,    # Aggregate: maximum value
+    min   as Fmin     # Aggregate: minimum value
+)
+
+# Display startup banner so execution progress is visible in Colab output
+print("=" * 70)
+print("  RetailChain Big Data Analytics - Complete Implementation")
+print("  Module: COM7020 | Student: Ahmed Abdullah")
+print("=" * 70)
+
+
+# ============================================================================
+# STAGE 2: SPARK SESSION INITIALISATION
+# ============================================================================
+# A SparkSession is the entry point for all Spark functionality.
+# It manages the connection to the cluster (or local mode in Colab) and
+# provides APIs for reading data, running SQL, and executing distributed jobs.
+
+spark = (
+    SparkSession.builder
+    .appName("RetailChain_COM7020_Complete")       # Application name shown in Spark UI
+    .config("spark.sql.shuffle.partitions", "8")   # Limit shuffle partitions to 8
+                                                    # (default is 200, which is excessive
+                                                    # for Colab's single-node local mode)
+    .getOrCreate()                                  # Reuse existing session or create new one
+)
+
+# Suppress verbose INFO logs; WARN level keeps output readable
+spark.sparkContext.setLogLevel("WARN")
+
+print("\n  Spark session initialised successfully")
+print(f"  Spark version: {spark.version}")
+
+
+# ============================================================================
+# STAGE 3: DATA INGESTION LAYER (Batch Processing)
+# ============================================================================
+# This stage implements the Bronze Zone of the lakehouse architecture.
+# Data is loaded from the CSV source exactly as received, with no
+# transformations, preserving the raw state for auditability.
+#
+# In a production deployment this would read from cloud object storage
+# (e.g., Amazon S3 or Google Cloud Storage) using the same Spark read API.
+
+# Path to the dataset file uploaded to the Colab /content directory
+INPUT_PATH = "/content/UK Retail Un-balance Synthetic Data Set.csv"
+
+print(f"\n  Loading raw data from: {INPUT_PATH}")
+
+df_raw = (
+    spark.read
+    .option("header", "true")       # First row of CSV contains column names
+    .option("inferSchema", "true")  # Spark automatically detects column data types
+    .csv(INPUT_PATH)                # Read the CSV file into a distributed DataFrame
+)
+
+# Print basic dataset statistics to verify the load completed correctly
+print(f"  Data loaded successfully")
+print(f"  Rows    : {df_raw.count():,}")
+print(f"  Columns : {len(df_raw.columns)}")
+
+# Display the inferred schema - confirms which columns Spark detected and their types
+print("\n  Schema of raw dataset:")
+df_raw.printSchema()
+
+# Preview the first five records to visually confirm the data looks correct
+print("\n  Sample records (first 5 rows):")
+df_raw.show(5, truncate=False)
+
+
+# ============================================================================
+# STAGE 4: DATA QUALITY AND STANDARDISATION (Governance / Silver Zone)
+# ============================================================================
+# This stage transforms the raw Bronze data into a clean, validated Silver
+# DataFrame. It applies six governance operations:
+#
+#   (A) Column name standardisation - consistent enterprise naming convention
+#   (B) Timestamp conversion        - ensures InvoiceDate is a proper datetime
+#   (C) Numeric column cleaning     - removes commas, casts to correct types
+#   (D) Derived column creation     - computes TotalPrice if missing
+#   (E) Discount flag normalisation - unifies varied source representations
+#   (F) Invalid record filtering    - removes nulls and negative values
+#   (G) Temporal partitioning       - adds Year, Month, Day, WeekOfYear columns
+#   (H) DataFrame caching           - caches the clean DF for faster re-use
+
+print("\n  Applying data quality and standardisation rules...")
+
+# Start from the raw DataFrame; transformations are applied incrementally
+df = df_raw
+
+# --------------------------------------------------------------------------
+# (A) Standardise column names to enterprise naming convention
+#     Different source systems may export columns with varying names.
+#     This mapping enforces a consistent schema regardless of source variation.
+# --------------------------------------------------------------------------
+column_mapping = {
+    "transaction_time" : "InvoiceDate",  # Rename POS timestamp field
+    "quantity"         : "Quantity",     # Ensure title-case naming
+    "unit_price_gbp"   : "UnitPrice",    # Rename to standard finance field name
+    "total_amount_gbp" : "TotalPrice"    # Rename to standard transaction amount field
+}
+
+for raw_col, desired_col in column_mapping.items():
+    if raw_col in df.columns and desired_col not in df.columns:
+        df = df.withColumnRenamed(raw_col, desired_col)
+        print(f"   Renamed: '{raw_col}' → '{desired_col}'")
+
+# --------------------------------------------------------------------------
+# (B) Convert InvoiceDate string to proper Spark TimestampType
+#     Required for all temporal operations in Stage 5 (Year, Month extraction)
+# --------------------------------------------------------------------------
+if "InvoiceDate" in df.columns:
+    df = df.withColumn("InvoiceDate", to_timestamp(col("InvoiceDate")))
+    print("   Converted InvoiceDate to TimestampType")
+
+# --------------------------------------------------------------------------
+# (C) Clean numeric columns
+#     CSV exports sometimes include thousands-separating commas (e.g., "1,250.00")
+#     which prevent correct numeric casting. regexp_replace strips them first.
+# --------------------------------------------------------------------------
+numeric_cols = ["Quantity", "UnitPrice", "TotalPrice", "discount_pct"]
+for c in numeric_cols:
+    if c in df.columns:
+        df = df.withColumn(
+            c,
+            regexp_replace(col(c).cast("string"), ",", "").cast("double")
+        )
+print("   Cleaned numeric columns (removed commas, cast to double)")
+
+# --------------------------------------------------------------------------
+# (D) Compute TotalPrice if not present in the source dataset
+#     Some source systems only export unit price and quantity, omitting
+#     the line-item total. This rule derives it from the available fields.
+# --------------------------------------------------------------------------
+if ("TotalPrice" not in df.columns
+        and "Quantity"  in df.columns
+        and "UnitPrice" in df.columns):
+    df = df.withColumn(
+        "TotalPrice",
+        (col("Quantity") * col("UnitPrice")).cast("double")
+    )
+    print("   Computed TotalPrice = Quantity × UnitPrice")
+
+# --------------------------------------------------------------------------
+# (E) Normalise DiscountApplied flag
+#     The source data may encode this flag in multiple ways:
+#     boolean True/False, string "Yes"/"No", integer 1/0, etc.
+#     This rule maps all variants to a single controlled vocabulary:
+#     "Discounted" or "Undiscounted".
+# --------------------------------------------------------------------------
+if "DiscountApplied" not in df.columns:
+    # Derive flag from discount_pct if it exists, otherwise fall back to
+    # detecting negative prices (common in some POS export formats)
+    if "discount_pct" in df.columns:
+        df = df.withColumn(
+            "DiscountApplied",
+            when(col("discount_pct") > 0, "Discounted").otherwise("Undiscounted")
+        )
+    else:
+        df = df.withColumn(
+            "DiscountApplied",
+            when(col("TotalPrice") < 0, "Discounted").otherwise("Undiscounted")
+        )
+else:
+    # If the column already exists, standardise its values
+    df = df.withColumn(
+        "DiscountApplied",
+        when(
+            col("DiscountApplied").isin(
+                "Discounted", "True", "true", "1", "Yes", "YES", "Y"
+            ),
+            "Discounted"
+        ).otherwise("Undiscounted")
+    )
+print("   Created / normalised DiscountApplied flag")
+
+# --------------------------------------------------------------------------
+# (F) Filter out invalid / corrupt records
+#     Business rules:
+#       - Quantity must be non-null and positive (no zero-quantity line items)
+#       - UnitPrice must be non-null and non-negative (returns handled elsewhere)
+#       - TotalPrice must be non-null
+#       - InvoiceDate must be non-null (records without dates are unanalysable)
+# --------------------------------------------------------------------------
+initial_count = df.count()   # Record count before filtering
+
+if "Quantity"    in df.columns: df = df.filter(col("Quantity").isNotNull()    & (col("Quantity") > 0))
+if "UnitPrice"   in df.columns: df = df.filter(col("UnitPrice").isNotNull()   & (col("UnitPrice") >= 0))
+if "TotalPrice"  in df.columns: df = df.filter(col("TotalPrice").isNotNull())
+if "InvoiceDate" in df.columns: df = df.filter(col("InvoiceDate").isNotNull())
+
+final_count = df.count()
+rejected    = initial_count - final_count
+
+print(f"   Quality filter: {rejected:,} records rejected "
+      f"({rejected / initial_count * 100:.1f}% of raw data)")
+print(f"   Clean dataset : {final_count:,} records retained")
+
+# --------------------------------------------------------------------------
+# (G) Add temporal partition columns
+#     These derived columns support time-series aggregations (monthly trends,
+#     weekly heatmaps, year-over-year comparisons) without repeatedly calling
+#     date extraction functions inside every aggregation query.
+# --------------------------------------------------------------------------
+if "InvoiceDate" in df.columns:
+    if "Year"       not in df.columns: df = df.withColumn("Year",       year(col("InvoiceDate")))
+    if "Month"      not in df.columns: df = df.withColumn("Month",      month(col("InvoiceDate")))
+    if "Day"        not in df.columns: df = df.withColumn("Day",        dayofmonth(col("InvoiceDate")))
+    if "WeekOfYear" not in df.columns: df = df.withColumn("WeekOfYear", weekofyear(col("InvoiceDate")))
+    print("   Added temporal partitions: Year, Month, Day, WeekOfYear")
+
+# --------------------------------------------------------------------------
+# (H) Cache the clean DataFrame
+#     Caching pins the DataFrame in memory so that subsequent aggregations
+#     in Stage 5 read from RAM rather than re-reading and re-parsing the CSV.
+#     The .count() call below triggers the actual materialisation of the cache.
+# --------------------------------------------------------------------------
+df.cache()
+df.count()   # Force Spark to execute the full transformation plan and cache result
+
+print("\n  Data quality and standardisation complete")
+print("\n  Cleaned data sample (first 5 rows):")
+df.show(5, truncate=False)
+
+
+# ============================================================================
+# STAGE 5: KPI COMPUTATION (Analytics / Gold Layer)
+# ============================================================================
+# This stage aggregates the clean Silver DataFrame into business KPIs.
+# Each aggregation produces a small Pandas DataFrame suitable for charting.
+#
+# The helper function to_pandas() safely converts Spark DataFrames to Pandas
+# with an optional row limit to prevent memory errors on large datasets.
+
+print("\n  Computing KPIs and analytical aggregations...")
+
+def to_pandas(spark_df, limit=200_000):
+    """
+    Convert a Spark DataFrame to a Pandas DataFrame safely.
+
+    Parameters
+    ----------
+    spark_df : pyspark.sql.DataFrame
+        The Spark DataFrame to convert.
+    limit : int, optional
+        Maximum number of rows to collect (default 200,000).
+        Prevents OutOfMemory errors when collecting large datasets.
+
+    Returns
+    -------
+    pandas.DataFrame
+    """
+    return spark_df.limit(limit).toPandas()
+
+
+# ------------------------------------------------------------------
+# KPI 1: Sales by Customer Segment
+# Purpose: Understand which customer tier drives the most revenue.
+# Business use: Loyalty escalation targeting, retention investment.
+# ------------------------------------------------------------------
+customer_sales = (
+    df.groupBy("customer_segment")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),         # Total revenue per segment
+          Fcount("*").alias("Transactions")           # Transaction count per segment
+      )
+      .orderBy(col("Sales").desc())                   # Highest revenue first
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 2: Monthly Sales Trend
+# Purpose: Identify seasonality, peaks, and growth/decline patterns.
+# Business use: Staffing, inventory planning, campaign scheduling.
+# ------------------------------------------------------------------
+monthly_sales = (
+    df.groupBy("Year", "Month")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions")
+      )
+      .orderBy("Year", "Month")
+      .toPandas()
+)
+
+# Create a formatted YearMonth label for clean x-axis display
+# e.g., Year=2023, Month=4 → "2023-04"
+monthly_sales["YearMonth"] = (
+    monthly_sales["Year"].astype(str) + "-" +
+    monthly_sales["Month"].astype(str).str.zfill(2)
+)
+
+# ------------------------------------------------------------------
+# KPI 3: Yearly Sales Trend
+# Purpose: Year-over-year performance comparison.
+# Business use: Annual planning, investor reporting, target setting.
+# ------------------------------------------------------------------
+yearly_sales = (
+    df.groupBy("Year")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions")
+      )
+      .orderBy("Year")
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 4: Discount Impact Analysis
+# Purpose: Measure what share of revenue is discounted.
+# Business use: Promotion ROI assessment, margin protection decisions.
+# ------------------------------------------------------------------
+discount_sales = (
+    df.groupBy("DiscountApplied")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions"),
+          Favg("TotalPrice").alias("AvgTransaction")   # Compare avg basket: discounted vs full price
+      )
+      .orderBy(col("Sales").desc())
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 5: Sales by Channel (In-Store, Online, Mobile)
+# Purpose: Understand omnichannel revenue split.
+# Business use: Digital investment decisions, fraud risk monitoring.
+# ------------------------------------------------------------------
+channel_sales = (
+    df.groupBy("channel")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions")
+      )
+      .orderBy(col("Sales").desc())
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 6: Top 10 Product Categories
+# Purpose: Identify highest-revenue product lines.
+# Business use: Merchandising priorities, buying strategy, cross-sell.
+# ------------------------------------------------------------------
+category_sales = (
+    df.groupBy("product_category")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions")
+      )
+      .orderBy(col("Sales").desc())
+      .limit(10)             # Only retrieve the top 10 categories
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 7: Regional Sales Distribution
+# Purpose: Map revenue across UK regions.
+# Business use: Regional capital allocation, store estate planning.
+# ------------------------------------------------------------------
+regional_sales = (
+    df.groupBy("region")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions")
+      )
+      .orderBy(col("Sales").desc())
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 8: Loyalty Tier Performance
+# Purpose: Measure revenue contribution by loyalty programme tier.
+# Business use: Tier benefit design, customer lifetime value modelling.
+# ------------------------------------------------------------------
+loyalty_sales = (
+    df.groupBy("loyalty_tier")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions"),
+          Favg("TotalPrice").alias("AvgTransaction")
+      )
+      .orderBy(col("Sales").desc())
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 9: Payment Method Analysis
+# Purpose: Understand how customers prefer to pay.
+# Business use: Checkout UX optimisation, fraud pattern analysis.
+# ------------------------------------------------------------------
+payment_sales = (
+    df.groupBy("payment_method")
+      .agg(
+          Fsum("TotalPrice").alias("Sales"),
+          Fcount("*").alias("Transactions")
+      )
+      .orderBy(col("Sales").desc())
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 10: Channel × Region Cross-Analysis
+# Purpose: Understand how each channel performs within each region.
+# Business use: Regional digital strategy, localised marketing spend.
+# ------------------------------------------------------------------
+channel_region = (
+    df.groupBy("region", "channel")
+      .agg(Fsum("TotalPrice").alias("Sales"))
+      .orderBy("region", col("Sales").desc())
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 11: Price Relationship Sample (Scatter data)
+# Purpose: Visualise the relationship between unit price and total spend.
+# Business use: Pricing strategy analysis, basket size distribution.
+# Note: Limited to 10,000 rows to keep the scatter chart readable.
+# ------------------------------------------------------------------
+price_sample = (
+    df.select("UnitPrice", "TotalPrice", "Quantity")
+      .limit(10_000)
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 12: Premium Customer Category Deep-Dive
+# Purpose: Show which categories Premium-tier customers buy most.
+# Business use: Premium tier benefit design, exclusive range selection.
+# ------------------------------------------------------------------
+premium_categories = (
+    df.filter(col("customer_segment") == "Premium")   # Filter to Premium customers only
+      .groupBy("product_category")
+      .agg(Fsum("TotalPrice").alias("TotalSales"))
+      .orderBy(col("TotalSales").desc())
+      .limit(5)              # Top 5 categories for this segment
+      .toPandas()
+)
+
+# ------------------------------------------------------------------
+# KPI 13: City-level Sales (for drill-down chart in Stage 8)
+# Purpose: Decompose regional sales to city level for drill-down.
+# Business use: Store-specific performance benchmarking.
+# ------------------------------------------------------------------
+print("\n  Aggregating sales by city within each region...")
+city_sales = (
+    df.groupBy("region", "city")
+      .agg(Fsum("TotalPrice").alias("Sales"))
+      .orderBy("region", col("Sales").desc())
+      .toPandas()
+)
+print("  City-level aggregation complete")
+
+# Summary of all KPIs computed
+print("\n  All KPIs computed successfully:")
+print(f"   Customer segments  : {len(customer_sales)}")
+print(f"   Monthly periods    : {len(monthly_sales)}")
+print(f"   Annual periods     : {len(yearly_sales)}")
+print(f"   Product categories : {len(category_sales)}")
+print(f"   Regions            : {len(regional_sales)}")
+print(f"   Loyalty tiers      : {len(loyalty_sales)}")
+print(f"   Cities             : {len(city_sales)}")
+
+
+# ============================================================================
+# STAGE 6: COMPREHENSIVE DASHBOARD VISUALISATIONS (12 Interactive Charts)
+# ============================================================================
+# Each chart is generated as an interactive Plotly figure displayed inline
+# in the Colab notebook. All charts use the config dict below which adds a
+# toolbar (zoom, pan, export PNG) but removes the Plotly logo.
+
+print("\n" + "=" * 70)
+print("  GENERATING INTERACTIVE DASHBOARD VISUALISATIONS")
+print("=" * 70)
+
+# Shared Plotly toolbar configuration applied to every chart
+chart_config = {
+    "displayModeBar"           : True,     # Show the zoom/pan/export toolbar
+    "displaylogo"              : False,    # Hide the Plotly logo
+    "modeBarButtonsToRemove"   : ["lasso2d", "select2d"]  # Remove rarely-used selection tools
+}
+
+# --------------------------------------------------------------------------
+# CHART 1: Sales by Customer Segment - Vertical Bar Chart
+# What it shows: Revenue contribution of each customer tier (Regular,
+#                Student, Senior, Premium).
+# Key insight  : Regular segment dominance (70%) indicates concentration risk.
+# --------------------------------------------------------------------------
+print("\n  Chart 1: Customer Segment Sales")
+fig1 = px.bar(
+    customer_sales,
+    x     = "customer_segment",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Sales by Customer Segment",
+    labels = {"customer_segment": "Customer Segment", "Sales": "Total Sales (GBP)"},
+    color              = "customer_segment",
+    color_discrete_sequence = px.colors.qualitative.Set2
+)
+fig1.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig1.update_layout(showlegend=False, xaxis_title="Customer Segment", yaxis_title="Sales (GBP)")
+fig1.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 2: Monthly Sales Trend - Line Chart with Range Slider
+# What it shows: Month-by-month revenue across all years in the dataset.
+# Key insight  : Seasonality peaks can be used for inventory and staffing.
+# --------------------------------------------------------------------------
+print("  Chart 2: Monthly Sales Trend")
+fig2 = px.line(
+    monthly_sales,
+    x       = "YearMonth",
+    y       = "Sales",
+    markers = True,
+    title   = "Monthly Sales Trend",
+    labels  = {"YearMonth": "Year-Month", "Sales": "Sales (GBP)"}
+)
+fig2.update_traces(line_color="#1f77b4", marker=dict(size=8))
+fig2.update_layout(xaxis_tickangle=-45, xaxis_title="Month", yaxis_title="Sales (GBP)")
+fig2.update_xaxes(rangeslider_visible=True)   # Range slider allows zooming into specific months
+fig2.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 3: Yearly Sales Trend - Line Chart
+# What it shows: Annual revenue trajectory for year-over-year comparison.
+# Key insight  : Identifies long-term growth or decline trends.
+# --------------------------------------------------------------------------
+print("  Chart 3: Yearly Sales Trend")
+fig3 = px.line(
+    yearly_sales,
+    x       = "Year",
+    y       = "Sales",
+    markers = True,
+    title   = "Yearly Sales Trend",
+    labels  = {"Year": "Year", "Sales": "Sales (GBP)"}
+)
+fig3.update_traces(line_color="#2ca02c", marker=dict(size=10), line=dict(width=3))
+fig3.update_layout(xaxis_title="Year", yaxis_title="Sales (GBP)")
+fig3.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 4: Discount Impact - Grouped Bar Chart
+# What it shows: Revenue split between discounted and full-price transactions.
+# Key insight  : ~46.7% discount share signals potential margin leakage if
+#                discounts are not driving incremental purchases.
+# --------------------------------------------------------------------------
+print("  Chart 4: Discount Impact Analysis")
+fig4 = px.bar(
+    discount_sales,
+    x     = "DiscountApplied",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Discounted vs Undiscounted Sales",
+    labels = {"DiscountApplied": "Discount Status", "Sales": "Sales (GBP)"},
+    color = "DiscountApplied",
+    color_discrete_map = {"Discounted": "#ff7f0e", "Undiscounted": "#2ca02c"}
+)
+fig4.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig4.update_layout(showlegend=True, xaxis_title="Discount Status", yaxis_title="Sales (GBP)")
+fig4.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 5: Sales by Channel - Bar Chart
+# What it shows: Revenue breakdown across In-Store, Online, and Mobile.
+# Key insight  : In-Store leads at 60%; digital channels (40%) are growing
+#                and require investment in fraud detection and UX.
+# --------------------------------------------------------------------------
+print("  Chart 5: Sales by Channel")
+fig5 = px.bar(
+    channel_sales,
+    x     = "channel",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Sales by Channel (In-Store vs Online vs Mobile)",
+    labels = {"channel": "Channel", "Sales": "Sales (GBP)"},
+    color              = "channel",
+    color_discrete_sequence = px.colors.qualitative.Pastel
+)
+fig5.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig5.update_layout(showlegend=False, xaxis_title="Channel", yaxis_title="Sales (GBP)")
+fig5.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 6: Top 10 Product Categories - Colour-Scaled Bar Chart
+# What it shows: The ten highest-revenue product categories.
+# Key insight  : Grocery dominates at ~50% of category revenue; Fashion and
+#                Beauty together represent the highest-margin growth opportunity.
+# --------------------------------------------------------------------------
+print("  Chart 6: Top 10 Product Categories")
+fig6 = px.bar(
+    category_sales,
+    x     = "product_category",
+    y     = "Sales",
+    title = "Top 10 Product Categories by Sales",
+    labels = {"product_category": "Product Category", "Sales": "Sales (GBP)"},
+    color                = "Sales",
+    color_continuous_scale = "Blues"    # Darker shade = higher revenue, aids quick ranking
+)
+fig6.update_layout(xaxis_tickangle=-45, xaxis_title="Product Category", yaxis_title="Sales (GBP)")
+fig6.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 7: Regional Sales Distribution - Colour-Scaled Bar Chart
+# What it shows: Revenue contribution of each UK region.
+# Key insight  : London leads at 22%; Northern Ireland is lowest, suggesting
+#                digital investment opportunity.
+# --------------------------------------------------------------------------
+print("  Chart 7: Regional Sales Distribution")
+fig7 = px.bar(
+    regional_sales,
+    x     = "region",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Sales by UK Region",
+    labels = {"region": "Region", "Sales": "Sales (GBP)"},
+    color                = "Sales",
+    color_continuous_scale = "Viridis"
+)
+fig7.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig7.update_layout(xaxis_tickangle=-45, xaxis_title="Region", yaxis_title="Sales (GBP)")
+fig7.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 8: Loyalty Tier Performance - Bar Chart
+# What it shows: Revenue by loyalty programme tier.
+# Key insight  : Premium tier does not outperform Standard/Basic, indicating
+#                the tier reward structure may need redesigning.
+# --------------------------------------------------------------------------
+print("  Chart 8: Loyalty Tier Performance")
+fig8 = px.bar(
+    loyalty_sales,
+    x     = "loyalty_tier",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Sales by Loyalty Tier",
+    labels = {"loyalty_tier": "Loyalty Tier", "Sales": "Sales (GBP)"},
+    color              = "loyalty_tier",
+    color_discrete_sequence = px.colors.qualitative.Bold
+)
+fig8.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig8.update_layout(showlegend=False, xaxis_title="Loyalty Tier", yaxis_title="Sales (GBP)")
+fig8.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 9: Payment Method Analysis - Bar Chart
+# What it shows: Revenue and transaction volume by payment type.
+# Key insight  : Dominant payment methods indicate where checkout
+#                friction would be most costly if removed or changed.
+# --------------------------------------------------------------------------
+print("  Chart 9: Payment Method Analysis")
+fig9 = px.bar(
+    payment_sales,
+    x     = "payment_method",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Sales by Payment Method",
+    labels = {"payment_method": "Payment Method", "Sales": "Sales (GBP)"},
+    color              = "payment_method",
+    color_discrete_sequence = px.colors.qualitative.Set3
+)
+fig9.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig9.update_layout(showlegend=False, xaxis_title="Payment Method", yaxis_title="Sales (GBP)")
+fig9.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 10: Channel × Region Cross-Analysis - Grouped Bar Chart
+# What it shows: How each sales channel performs within each UK region.
+# Key insight  : Reveals whether digital channels are equally developed
+#                across all regions or concentrated in specific markets.
+# --------------------------------------------------------------------------
+print("  Chart 10: Channel-Region Cross Analysis")
+fig10 = px.bar(
+    channel_region,
+    x       = "region",
+    y       = "Sales",
+    color   = "channel",
+    barmode = "group",
+    title   = "Sales by Channel and Region (Cross-Analysis)",
+    labels  = {"region": "Region", "Sales": "Sales (GBP)", "channel": "Channel"}
+)
+fig10.update_layout(xaxis_tickangle=-45, xaxis_title="Region", yaxis_title="Sales (GBP)")
+fig10.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 11: Unit Price vs Total Price Scatter Plot
+# What it shows: Relationship between unit price, quantity, and transaction value.
+# Key insight  : Identifies basket composition patterns and outliers that
+#                may indicate bulk buying, returns, or pricing anomalies.
+# Note: Rendered on a 10,000-row sample for performance.
+# --------------------------------------------------------------------------
+print("  Chart 11: Price Relationship Analysis (10,000 row sample)")
+fig11 = px.scatter(
+    price_sample,
+    x           = "UnitPrice",
+    y           = "TotalPrice",
+    color       = "Quantity",
+    size        = "Quantity",
+    title       = "Relationship Between Unit Price and Total Transaction Value",
+    labels      = {"UnitPrice": "Unit Price (GBP)",
+                   "TotalPrice": "Total Transaction Value (GBP)",
+                   "Quantity": "Quantity"},
+    hover_data  = ["Quantity"],
+    opacity     = 0.6          # Partial transparency helps show point density
+)
+fig11.update_layout(xaxis_title="Unit Price (GBP)", yaxis_title="Total Price (GBP)")
+fig11.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 12: Premium Customer Category Deep-Dive - Bar Chart
+# What it shows: Top 5 product categories for Premium-tier customers only.
+# Key insight  : Guides decisions on exclusive product ranges and Premium
+#                tier benefits that are aligned with actual buying behaviour.
+# --------------------------------------------------------------------------
+print("  Chart 12: Premium Customer Category Deep-Dive")
+fig12 = px.bar(
+    premium_categories,
+    x     = "product_category",
+    y     = "TotalSales",
+    title = "Top 5 Product Categories – Premium Customers Only",
+    labels = {"product_category": "Product Category",
+              "TotalSales": "Total Sales (GBP)"},
+    text                 = "TotalSales",
+    color                = "TotalSales",
+    color_continuous_scale = "Purples"
+)
+fig12.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig12.update_layout(xaxis_tickangle=-45, xaxis_title="Product Category", yaxis_title="Sales (GBP)")
+fig12.show(config=chart_config)
+
+
+# ============================================================================
+# STAGE 7: SUMMARY STATISTICS AND HEADLINE KPIs
+# ============================================================================
+# Prints a clean summary table of key business metrics to the console.
+# This output matches the KPI cards displayed in the executive dashboard.
+
+print("\n" + "=" * 70)
+print("  RETAILCHAIN ANALYTICS SUMMARY")
+print("=" * 70)
+
+# Compute overall metrics directly from the Spark DataFrame
+print("\n  Overall Business Performance:")
+print(f"   Total Sales              : £{df.select(Fsum('TotalPrice')).collect()[0][0]:,.2f}")
+print(f"   Total Transactions       : {df.count():,}")
+print(f"   Average Transaction Value: £{df.select(Favg('TotalPrice')).collect()[0][0]:.2f}")
+
+# Identify top performers in each analytical dimension
+print(f"\n  Top Performers:")
+print(f"   Best Customer Segment : {customer_sales.iloc[0]['customer_segment']} "
+      f"(£{customer_sales.iloc[0]['Sales']:,.0f})")
+print(f"   Best Region           : {regional_sales.iloc[0]['region']} "
+      f"(£{regional_sales.iloc[0]['Sales']:,.0f})")
+print(f"   Best Product Category : {category_sales.iloc[0]['product_category']} "
+      f"(£{category_sales.iloc[0]['Sales']:,.0f})")
+
+# Compute discount ratio for promotional insight
+discount_total    = discount_sales[discount_sales["DiscountApplied"] == "Discounted"]["Sales"].values[0]
+discount_ratio_pct = discount_total / discount_sales["Sales"].sum() * 100
+
+print(f"\n  Key Insights:")
+print(f"   Discount Sales Share : {discount_ratio_pct:.1f}% of total revenue from discounted items")
+print(f"   Channel Breakdown    : {channel_sales.to_dict('records')}")
+
+print("\n" + "=" * 70)
+print("  ANALYSIS COMPLETE — 12 interactive visualisations generated")
+print("=" * 70)
+
+
+# ============================================================================
+# STAGE 7b: TOTAL SALES GAUGE CHART (KPI Indicator)
+# ============================================================================
+# A gauge chart provides an at-a-glance view of total sales relative to
+# a defined business target. The needle position and colour bands make it
+# immediately clear whether the target has been met.
+
+print("\n  Chart 13: Total Sales Gauge")
+
+# Retrieve total sales from Spark
+total_sales_value = df.select(Fsum("TotalPrice")).collect()[0][0]
+
+# Define a revenue target (adjust this value to reflect the actual business target)
+sales_target = 60_000_000   # Example: £60 million target
+
+fig_gauge = go.Figure(go.Indicator(
+    mode   = "gauge+number",
+    value  = total_sales_value,
+    domain = {"x": [0, 1], "y": [0, 1]},
+    title  = {"text": "<b>Total Sales</b> (GBP)"},
+    gauge  = {
+        "axis"       : {"range": [None, sales_target * 1.2],   # Axis max = 120% of target
+                        "tickwidth": 1, "tickcolor": "darkblue"},
+        "bar"        : {"color": "#1f77b4"},                    # Filled bar colour
+        "bgcolor"    : "white",
+        "borderwidth": 2,
+        "bordercolor": "gray",
+        "steps"      : [
+            # Light grey zone = 0 to 50% of target (below half)
+            {"range": [0, sales_target * 0.5], "color": "lightgray"},
+            # Dark grey zone = 50% to 100% of target
+            {"range": [sales_target * 0.5, sales_target], "color": "gray"}
+        ],
+        "threshold"  : {
+            "line"     : {"color": "red", "width": 4},   # Red line marks the target
+            "thickness": 0.75,
+            "value"    : sales_target
+        }
+    }
+))
+fig_gauge.update_layout(margin=dict(l=20, r=30, t=50, b=20), title_x=0.5)
+fig_gauge.show(config=chart_config)
+
+
+# ============================================================================
+# STAGE 8: INTERACTIVE DRILL-DOWN VISUALISATION (City-Level)
+# ============================================================================
+# This stage adds a region-to-city drill-down using an ipywidgets Dropdown.
+# The user selects a UK region from the dropdown and the chart updates
+# automatically to show the city-level sales breakdown within that region.
+#
+# This pattern demonstrates how a BI dashboard would allow a regional
+# director to move from national → regional → city-level insights
+# without needing a separate query for each level.
+
+import ipywidgets as widgets
+from IPython.display import display
+
+print("\n" + "=" * 70)
+print("  STAGE 8: INTERACTIVE REGIONAL DRILL-DOWN")
+print("=" * 70)
+
+# --------------------------------------------------------------------------
+# CHART 14: Regional Overview (starting point for drill-down)
+# --------------------------------------------------------------------------
+print("\n  Chart 14: Regional Overview (starting view)")
+fig_region = px.bar(
+    regional_sales,
+    x     = "region",
+    y     = "Sales",
+    text  = "Sales",
+    title = "Total Sales by Region — Select a region below to drill down to city level",
+    labels = {"region": "Region", "Sales": "Total Sales (GBP)"},
+    color              = "region",
+    color_discrete_sequence = px.colors.qualitative.Pastel
+)
+fig_region.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+fig_region.update_layout(showlegend=False, xaxis_title="Region", yaxis_title="Sales (GBP)")
+fig_region.show(config=chart_config)
+
+# --------------------------------------------------------------------------
+# CHART 15: City-Level Drill-Down (controlled by dropdown widget)
+# --------------------------------------------------------------------------
+print("\n  Chart 15: City Drill-Down (use dropdown to select region)")
+
+# Build the list of unique regions to populate the dropdown
+unique_regions = sorted(city_sales["region"].unique().tolist())
+
+# Create the Dropdown widget
+region_selector = widgets.Dropdown(
+    options     = unique_regions,
+    value       = unique_regions[0] if unique_regions else None,  # Default to first region
+    description = "Select Region:",
+    disabled    = False
+)
+
+def display_city_sales(selected_region):
+    """
+    Callback function triggered when the user changes the dropdown selection.
+    Filters city_sales to the chosen region and renders a bar chart.
+
+    Parameters
+    ----------
+    selected_region : str
+        The region name selected by the user in the dropdown widget.
+    """
+    if not selected_region:
+        print("  Please select a region from the dropdown.")
+        return
+
+    # Filter Pandas DataFrame to the selected region
+    filtered = city_sales[city_sales["region"] == selected_region]
+
+    if not filtered.empty:
+        fig_city = px.bar(
+            filtered,
+            x     = "city",
+            y     = "Sales",
+            text  = "Sales",
+            title = f"Sales by City — {selected_region} Region",
+            labels = {"city": "City", "Sales": "Total Sales (GBP)"},
+            color              = "city",
+            color_discrete_sequence = px.colors.qualitative.T10
+        )
+        fig_city.update_traces(texttemplate="£%{text:,.0f}", textposition="outside")
+        fig_city.update_layout(
+            showlegend   = False,
+            xaxis_title  = "City",
+            yaxis_title  = "Sales (GBP)",
+            yaxis        = dict(range=[0, filtered["Sales"].max() * 1.15])  # Add 15% headroom above highest bar
+        )
+        fig_city.show(config=chart_config)
+    else:
+        print(f"  No city-level data available for region: {selected_region}")
+
+# Link the dropdown widget to the callback function and display both together
+interactive_plot = widgets.interactive(display_city_sales, selected_region=region_selector)
+display(interactive_plot)
+
+
+# ============================================================================
+# STAGE 9: INTEGRATED INTERACTIVE HTML DASHBOARD
+# ============================================================================
+# This stage generates a fully self-contained HTML file containing:
+#   - KPI summary cards (Total Sales, Transactions, Avg Transaction, Discount %)
+#   - Five interactive Plotly charts (Customer Segments, Regional Donut,
+#     Category Bar, Channel Donut, Top Cities)
+#
+# The HTML file can be downloaded from Colab and:
+#   - Opened in any web browser without an internet connection
+#   - Shared with non-technical stakeholders
+#   - Attached to the COM7020 report as a supplementary exhibit
+#   - Uploaded to GitHub alongside this script
+#
+# The dashboard is built using vanilla JavaScript + Plotly CDN so it has
+# no server-side dependency.
+
+from IPython.display import HTML, display as ipy_display
+import json
+
+print("\n" + "=" * 70)
+print("  STAGE 9: GENERATING INTEGRATED HTML DASHBOARD")
+print("=" * 70)
+
+def create_complete_dashboard():
+    """
+    Build a complete self-contained HTML analytics dashboard from the
+    Spark-computed KPI data.
+
+    All data is embedded as JavaScript constants so the file works
+    offline without any backend or API calls.
+
+    Returns
+    -------
+    str
+        Full HTML source code for the dashboard.
+    """
+
+    # ---- Recompute headline KPIs from Spark for accuracy ----
+    total_sales       = df.select(Fsum("TotalPrice")).collect()[0][0]
+    total_transactions = df.count()
+    avg_transaction   = df.select(Favg("TotalPrice")).collect()[0][0]
+
+    # Discount ratio
+    disc_sales   = df.filter(col("DiscountApplied") == "Discounted").select(Fsum("TotalPrice")).collect()[0][0] or 0
+    disc_ratio   = (disc_sales / total_sales * 100) if total_sales > 0 else 0
+
+    # ---- Convert Pandas DataFrames to Python dicts for JSON serialisation ----
+    customer_dict = customer_sales.set_index("customer_segment")["Sales"].to_dict() \
+                    if not customer_sales.empty else {}
+
+    regional_dict = regional_sales.set_index("region")["Sales"].to_dict() \
+                    if not regional_sales.empty else {}
+
+    category_dict = category_sales.set_index("product_category")["Sales"].to_dict() \
+                    if not category_sales.empty else {}
+
+    # City data: aggregate to city level (sum across regions for top-city bar chart)
+    city_dict = city_sales.groupby("city")["Sales"].sum().to_dict() \
+                if "city" in city_sales.columns else {}
+
+    # Channel list keeps both Sales and Transactions for dual-metric charts
+    channel_list = channel_sales.to_dict("records") if not channel_sales.empty else []
+
+    # ---- Build the HTML string ----
+    html_code = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RetailChain UK Retail Analytics Dashboard — COM7020</title>
+    <!-- Plotly loaded from CDN — requires internet on first open -->
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <style>
+        /* ── Reset and base styles ── */
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 15px;
+        }}
+        /* ── Outer container ── */
+        .container {{
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }}
+        /* ── Header banner ── */
+        .header {{
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            padding: 35px 40px;
+            text-align: center;
+        }}
+        .header h1 {{ font-size: 2.5em; margin-bottom: 8px; font-weight: 700; }}
+        .header p  {{ font-size: 1.1em; opacity: 0.9; }}
+        /* ── KPI cards row ── */
+        .kpi-section {{
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            padding: 35px 40px;
+        }}
+        .kpi-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+        }}
+        .kpi-card {{
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 18px rgba(0,0,0,0.1);
+            border-left: 5px solid;
+            transition: transform 0.3s;
+        }}
+        /* Each card gets a different accent colour on its left border */
+        .kpi-card:nth-child(1) {{ border-left-color: #667eea; }}
+        .kpi-card:nth-child(2) {{ border-left-color: #f093fb; }}
+        .kpi-card:nth-child(3) {{ border-left-color: #4facfe; }}
+        .kpi-card:nth-child(4) {{ border-left-color: #43e97b; }}
+        .kpi-card:hover {{ transform: translateY(-5px); }}
+        .kpi-label {{
+            font-size: 0.9em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }}
+        .kpi-value {{
+            font-size: 2.3em;
+            font-weight: bold;
+            color: #1e3c72;
+            margin-bottom: 8px;
+        }}
+        .kpi-sub {{ font-size: 0.85em; color: #888; }}
+        /* ── Chart grid ── */
+        .charts-section {{ padding: 35px 40px; background: #f8f9fa; }}
+        .charts-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 25px;
+        }}
+        .chart-container {{
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 18px rgba(0,0,0,0.1);
+        }}
+        /* Span full width for the cities chart */
+        .chart-container.full {{ grid-column: 1 / -1; }}
+        .chart-title {{
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #1e3c72;
+            margin-bottom: 18px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #f0f0f0;
+        }}
+        @media (max-width: 1200px) {{
+            .charts-grid {{ grid-template-columns: 1fr; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ── Header ── -->
+        <div class="header">
+            <h1>RetailChain UK Retail Analytics Dashboard</h1>
+            <p>COM7020 Big Data and Cloud Computing | Apache Spark + Plotly | Ahmed Abdullah</p>
+        </div>
+
+        <!-- ── KPI Summary Cards ── -->
+        <div class="kpi-section">
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-label">Total Sales</div>
+                    <div class="kpi-value">£{total_sales/1_000_000:.2f}M</div>
+                    <div class="kpi-sub">Across all channels and regions</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Total Transactions</div>
+                    <div class="kpi-value">{total_transactions:,}</div>
+                    <div class="kpi-sub">Successfully processed orders</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Avg Transaction Value</div>
+                    <div class="kpi-value">£{avg_transaction:.2f}</div>
+                    <div class="kpi-sub">Average basket size per order</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Discount Impact</div>
+                    <div class="kpi-value">{disc_ratio:.1f}%</div>
+                    <div class="kpi-sub">Share of revenue from discounted items</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Chart Grid ── -->
+        <div class="charts-section">
+            <div class="charts-grid">
+                <div class="chart-container">
+                    <div class="chart-title">1. Customer Segment Analysis</div>
+                    <div id="chart1" style="height:360px;"></div>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-title">2. Regional Sales Distribution</div>
+                    <div id="chart2" style="height:360px;"></div>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-title">3. Product Category Performance</div>
+                    <div id="chart3" style="height:360px;"></div>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-title">4. Sales Channel Breakdown</div>
+                    <div id="chart4" style="height:360px;"></div>
+                </div>
+                <div class="chart-container full">
+                    <div class="chart-title">5. Top 10 Cities by Revenue</div>
+                    <div id="chart5" style="height:400px;"></div>
+                </div>
+            </div>
+        </div>
+
+    </div><!-- end .container -->
+
+    <script>
+        // ── Embed all KPI data as JavaScript constants ──
+        // Data is serialised from Spark-computed Pandas DataFrames via Python's json module.
+        const DATA = {{
+            customers : {json.dumps(customer_dict)},
+            regions   : {json.dumps(regional_dict)},
+            categories: {json.dumps(category_dict)},
+            cities    : {json.dumps(city_dict)},
+            channels  : {json.dumps(channel_list)}
+        }};
+
+        const config = {{ displayModeBar: true, responsive: true, displaylogo: false }};
+        const COLORS = ['#667eea','#f093fb','#4facfe','#43e97b','#fa709a','#fee140','#a18cd1','#fbc2eb'];
+
+        // ── Chart 1: Customer Segments Bar ──
+        if (Object.keys(DATA.customers).length > 0) {{
+            Plotly.newPlot('chart1', [{{
+                x: Object.keys(DATA.customers),
+                y: Object.values(DATA.customers),
+                type: 'bar',
+                marker: {{ color: COLORS, line: {{ color: '#1e3c72', width: 1.5 }} }},
+                text: Object.values(DATA.customers).map(v => `£${{(v/1e6).toFixed(2)}}M`),
+                textposition: 'outside'
+            }}], {{
+                margin: {{ t: 20, b: 60, l: 80, r: 20 }},
+                xaxis: {{ title: 'Customer Segment' }},
+                yaxis: {{ title: 'Sales (£)' }},
+                plot_bgcolor: '#f8f9fa'
+            }}, config);
+        }}
+
+        // ── Chart 2: Regional Donut Chart ──
+        if (Object.keys(DATA.regions).length > 0) {{
+            Plotly.newPlot('chart2', [{{
+                labels: Object.keys(DATA.regions),
+                values: Object.values(DATA.regions),
+                type: 'pie',
+                hole: 0.45,                     // Donut hole = 45% of radius
+                marker: {{ colors: COLORS }},
+                textinfo: 'label+percent'
+            }}], {{
+                margin: {{ t: 20, b: 20, l: 20, r: 20 }},
+                showlegend: true
+            }}, config);
+        }}
+
+        // ── Chart 3: Category Horizontal Bar ──
+        if (Object.keys(DATA.categories).length > 0) {{
+            const sortedCats = Object.entries(DATA.categories).sort((a, b) => b[1] - a[1]);
+            Plotly.newPlot('chart3', [{{
+                y: sortedCats.map(c => c[0]),
+                x: sortedCats.map(c => c[1]),
+                type: 'bar',
+                orientation: 'h',
+                marker: {{ color: '#4facfe', line: {{ color: '#1e3c72', width: 1.5 }} }},
+                text: sortedCats.map(c => `£${{(c[1]/1e6).toFixed(2)}}M`),
+                textposition: 'outside'
+            }}], {{
+                margin: {{ t: 20, b: 50, l: 130, r: 60 }},
+                xaxis: {{ title: 'Sales (£)' }},
+                plot_bgcolor: '#f8f9fa'
+            }}, config);
+        }}
+
+        // ── Chart 4: Channel Donut ──
+        if (DATA.channels.length > 0) {{
+            Plotly.newPlot('chart4', [{{
+                labels: DATA.channels.map(c => c.channel),
+                values: DATA.channels.map(c => c.Sales),
+                type: 'pie',
+                hole: 0.50,
+                marker: {{ colors: ['#667eea','#43e97b','#f093fb'] }},
+                textinfo: 'label+percent'
+            }}], {{
+                margin: {{ t: 20, b: 20, l: 20, r: 20 }}
+            }}, config);
+        }}
+
+        // ── Chart 5: Top 10 Cities Bar ──
+        if (Object.keys(DATA.cities).length > 0) {{
+            const topCities = Object.entries(DATA.cities)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10);           // Take only the top 10 cities
+            Plotly.newPlot('chart5', [{{
+                x: topCities.map(c => c[0]),
+                y: topCities.map(c => c[1]),
+                type: 'bar',
+                marker: {{
+                    color: topCities.map((_, i) => COLORS[i % COLORS.length]),
+                    line : {{ color: '#1e3c72', width: 1.5 }}
+                }},
+                text: topCities.map(c => `£${{(c[1]/1e6).toFixed(2)}}M`),
+                textposition: 'outside'
+            }}], {{
+                margin: {{ t: 20, b: 100, l: 80, r: 20 }},
+                xaxis : {{ title: 'City', tickangle: -30 }},
+                yaxis : {{ title: 'Sales (£)' }},
+                plot_bgcolor: '#f8f9fa'
+            }}, config);
+        }}
+    </script>
+</body>
+</html>"""
+
+    return html_code
+
+
+# Generate dashboard HTML and display it inline in Colab
+dashboard_html = create_complete_dashboard()
+ipy_display(HTML(dashboard_html))
+
+# Save the dashboard as a downloadable HTML file
+output_file = "/content/uk_retail_dashboard_COM7020.html"
+with open(output_file, "w", encoding="utf-8") as f:
+    f.write(dashboard_html)
+
+print(f"\n  Interactive dashboard displayed above in notebook output")
+print(f"  Dashboard saved to  : {output_file}")
+print("  To download         : Files panel (left sidebar) → right-click → Download")
+print("\n" + "=" * 70)
+print("  COMPLETE — All 15 visualisations generated successfully")
+print("  Dashboard ready for business stakeholder review")
+print("=" * 70)
