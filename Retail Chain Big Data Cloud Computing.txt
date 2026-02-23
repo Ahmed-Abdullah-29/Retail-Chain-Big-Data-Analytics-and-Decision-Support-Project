@@ -2,10 +2,6 @@
 # RetailChain Big Data Analytics Pipeline
 # ============================================================================
 # Module    : COM7020 - Big Data and Cloud Computing
-# Student   : Ahmed Abdullah
-# University: Arden University
-# Date      : February 2026
-#
 # Description:
 #   This script implements a complete big data analytics pipeline for
 #   RetailChain, a national UK retailer. It covers every stage of the
@@ -1330,4 +1326,5 @@ print("  To download         : Files panel (left sidebar) → right-click → Do
 print("\n" + "=" * 70)
 print("  COMPLETE — All 15 visualisations generated successfully")
 print("  Dashboard ready for business stakeholder review")
+
 print("=" * 70)
