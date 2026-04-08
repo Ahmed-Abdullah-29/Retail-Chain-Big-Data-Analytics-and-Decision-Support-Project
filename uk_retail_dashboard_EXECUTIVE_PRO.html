@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RetailChain Executive Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root {
+      --bg0: #0b1020;
+      --bg1: #0f172a;
+      --card: rgba(255,255,255,0.08);
+      --card2: rgba(255,255,255,0.10);
+      --text: rgba(255,255,255,0.92);
+      --muted: rgba(255,255,255,0.68);
+      --line: rgba(255,255,255,0.16);
+      --accent: #7c3aed;
+      --accent2: #22c55e;
+      --shadow: 0 18px 50px rgba(0,0,0,0.45);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: radial-gradient(1200px 700px at 10% 10%, #1b2a6b 0%, transparent 55%),
+                  radial-gradient(900px 600px at 90% 20%, #5b21b6 0%, transparent 55%),
+                  linear-gradient(180deg, var(--bg0), var(--bg1));
+      color: var(--text);
+      padding: 18px;
+    }
+    .wrap {
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      padding: 18px 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,0.06);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+    .title h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0.2px;
+    }
+    .title p {
+      margin: 6px 0 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .badge {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.07);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .grid {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 14px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+      padding: 16px;
+      overflow: hidden;
+    }
+    .kpi {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 16px 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.06));
+    }
+    .kpi .label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .kpi .value {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: 0.2px;
+    }
+    .kpi .sub {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .kpi-row {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 14px;
+    }
+    .kpi-row .card { padding: 0; }
+    .k1 { grid-column: span 3; }
+    .k2 { grid-column: span 3; }
+    .k3 { grid-column: span 3; }
+    .k4 { grid-column: span 3; }
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      padding: 2px 4px 12px 4px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 12px;
+    }
+    .panel-title h2 {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: 0.2px;
+    }
+    .panel-title .hint {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .span6 { grid-column: span 6; }
+    .span4 { grid-column: span 4; }
+    .span8 { grid-column: span 8; }
+    .span12 { grid-column: span 12; }
+    .plot { height: 360px; }
+    .plot.tall { height: 430px; }
+    .footer {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      opacity: 0.85;
+    }
+    @media (max-width: 1100px) {
+      .k1,.k2,.k3,.k4 { grid-column: span 6; }
+      .span6,.span4,.span8 { grid-column: span 12; }
+      .plot { height: 360px; }
+    }
+    @media (max-width: 640px) {
+      .k1,.k2,.k3,.k4 { grid-column: span 12; }
+      .topbar { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title">
+        <h1>RetailChain Executive Dashboard</h1>
+        <p>Validated to your Spark/Colab outputs (Sales = total_amount_gbp, your existing filters).<br/>
+        Best Segment: <b>Regular</b> · Best Region: <b>London</b> · Best Category: <b>Grocery</b></p>
+      </div>
+      <div class="badge">COM7020 · Spark + Plotly · Stakeholder View</div>
+    </div>
+
+    <div class="grid">
+      <div class="kpi-row">
+        <div class="card k1"><div class="kpi">
+          <div class="label">Total Sales</div>
+          <div class="value">£157.88M</div>
+          <div class="sub">Sum of Sales across all channels/regions (matches notebook)</div>
+        </div></div>
+        <div class="card k2"><div class="kpi">
+          <div class="label">Transactions</div>
+          <div class="value">201,864</div>
+          <div class="sub">Distinct transaction_id count</div>
+        </div></div>
+        <div class="card k3"><div class="kpi">
+          <div class="label">Avg Transaction Value</div>
+          <div class="value">£782.09</div>
+          <div class="sub">Total Sales ÷ Transactions</div>
+        </div></div>
+        <div class="card k4"><div class="kpi">
+          <div class="label">Discount Impact</div>
+          <div class="value">46.7%</div>
+          <div class="sub">Share of sales from discounted items</div>
+        </div></div>
+      </div>
+
+      <div class="card span6">
+        <div class="panel-title"><h2>Customer Segments</h2><div class="hint">Net contribution by segment</div></div>
+        <div id="seg" class="plot"></div>
+      </div>
+
+      <div class="card span6">
+        <div class="panel-title"><h2>Regional Share</h2><div class="hint">Sales distribution by region</div></div>
+        <div id="reg" class="plot"></div>
+      </div>
+
+      <div class="card span6">
+        <div class="panel-title"><h2>Product Categories</h2><div class="hint">Top categories by revenue</div></div>
+        <div id="cat" class="plot"></div>
+      </div>
+
+      <div class="card span6">
+        <div class="panel-title"><h2>Channel Mix</h2><div class="hint">Sales share by channel</div></div>
+        <div id="chn" class="plot"></div>
+      </div>
+
+      <div class="card span12">
+        <div class="panel-title"><h2>Top Cities</h2><div class="hint">Top 10 cities by sales</div></div>
+        <div id="city" class="plot tall"></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Tip: Use the Plotly toolbar to zoom, pan, and export PNG for your report.
+    </div>
+  </div>
+
+<script>
+  const DATA = {"customers": {"Regular": 110372703.71999916, "Student": 15973307.559999991, "Senior": 15830827.61000001, "Premium": 15698470.550000045}, "regions": {"London": 34758769.580000006, "Midlands": 22331874.37999994, "South East": 22315585.460000075, "North West": 18914985.559999943, "Scotland": 15721838.320000023, "South West": 15649254.589999996, "North East": 12546660.650000025, "Wales": 11025571.740000017, "Northern Ireland": 4610769.159999998}, "categories": {"Grocery": 78682188.83999959, "Fashion": 24154988.910000004, "Beauty": 23801124.460000046, "Electronics": 15621759.279999934, "Home": 15615247.95000008}, "cities": {"Bath": 7753402.310000002, "Belfast": 4610769.159999998, "Birmingham": 10880857.819999997, "Brighton": 7479262.639999992, "Bristol": 7895852.279999985, "Cardiff": 11025571.740000017, "Edinburgh": 7895567.950000003, "Glasgow": 7826270.369999994, "Leicester": 11451016.559999954, "Liverpool": 9431255.619999997, "London": 34758769.580000006, "Manchester": 9483729.940000016, "Newcastle": 12546660.650000025, "Oxford": 7350466.709999984, "Reading": 7485856.110000002}, "channels": [{"channel": "In-Store", "Sales": 94829389.53000008, "Transactions": 121460}, {"channel": "Online", "Sales": 47331282.13999982, "Transactions": 60406}, {"channel": "Mobile", "Sales": 15714637.77000004, "Transactions": 19998}]};
+  const config = { displayModeBar: true, responsive: true, displaylogo: false };
+
+  // Segment bar
+  const segX = Object.keys(DATA.customers);
+  const segY = Object.values(DATA.customers);
+  Plotly.newPlot('seg', [{
+    x: segX,
+    y: segY,
+    type: 'bar',
+    text: segY.map(v => `£${(v/1e6).toFixed(2)}M`),
+    textposition: 'outside',
+    hovertemplate: '%{x}<br>Sales: £%{y:,.2f}<extra></extra>'
+  }], {
+    margin: {t: 10, b: 70, l: 70, r: 20},
+    xaxis: {title: 'Customer Segment'},
+    yaxis: {title: 'Sales (GBP)'},
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    paper_bgcolor: 'rgba(0,0,0,0)'
+  }, config);
+
+  // Region donut
+  Plotly.newPlot('reg', [{
+    labels: Object.keys(DATA.regions),
+    values: Object.values(DATA.regions),
+    type: 'pie',
+    hole: 0.55,
+    textinfo: 'label+percent',
+    hovertemplate: '%{label}<br>Sales: £%{value:,.2f}<extra></extra>'
+  }], {
+    margin: {t: 10, b: 10, l: 10, r: 10},
+    showlegend: true,
+    legend: {orientation: 'v'},
+    paper_bgcolor: 'rgba(0,0,0,0)'
+  }, config);
+
+  // Category horizontal bar
+  const catEntries = Object.entries(DATA.categories).sort((a,b)=>b[1]-a[1]);
+  Plotly.newPlot('cat', [{
+    y: catEntries.map(d=>d[0]),
+    x: catEntries.map(d=>d[1]),
+    type: 'bar',
+    orientation: 'h',
+    text: catEntries.map(d => `£${(d[1]/1e6).toFixed(2)}M`),
+    textposition: 'outside',
+    hovertemplate: '%{y}<br>Sales: £%{x:,.2f}<extra></extra>'
+  }], {
+    margin: {t: 10, b: 50, l: 140, r: 20},
+    xaxis: {title: 'Sales (GBP)'},
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    paper_bgcolor: 'rgba(0,0,0,0)'
+  }, config);
+
+  // Channel donut
+  Plotly.newPlot('chn', [{
+    labels: DATA.channels.map(d=>d.channel),
+    values: DATA.channels.map(d=>d.Sales),
+    type: 'pie',
+    hole: 0.60,
+    textinfo: 'label+percent',
+    hovertemplate: '%{label}<br>Sales: £%{value:,.2f}<extra></extra>'
+  }], {
+    margin: {t: 10, b: 10, l: 10, r: 10},
+    paper_bgcolor: 'rgba(0,0,0,0)'
+  }, config);
+
+  // Cities top10
+  const cityEntries = Object.entries(DATA.cities).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  Plotly.newPlot('city', [{
+    x: cityEntries.map(d=>d[0]),
+    y: cityEntries.map(d=>d[1]),
+    type: 'bar',
+    text: cityEntries.map(d => `£${(d[1]/1e6).toFixed(2)}M`),
+    textposition: 'outside',
+    hovertemplate: '%{x}<br>Sales: £%{y:,.2f}<extra></extra>'
+  }], {
+    margin: {t: 10, b: 95, l: 70, r: 20},
+    xaxis: {title: 'City', tickangle: -25},
+    yaxis: {title: 'Sales (GBP)'},
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    paper_bgcolor: 'rgba(0,0,0,0)'
+  }, config);
+</script>
+</body>
+</html>
